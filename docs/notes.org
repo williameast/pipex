@@ -1,0 +1,322 @@
+
+* setup
+** header
+set up the header, assuming you have all of the libft stuff installed.
+
+fnctl gives us the open()
+what gives us dup2()?
+
+#+begin_src c
+
+#ifndef PIPEX_H
+#define PIPEX_H
+
+
+// INCLUDES
+#include <fcntl.h>
+#include <unistd.h>
+#include "libft.h"
+#include "libft_extra.h"
+#include "ft_printf.h"
+
+#endif // PIPEX_H
+
+#+end_src
+
+* whitelisted functions
+** redirection, AKA what the fuck is ~dup2(2)~?
+
+~dup2(2)~ helps you replace open fds, so you can redirect output from one fd to
+another.
+| fd | name   | description                                              |
+|----+--------+----------------------------------------------------------|
+|  0 | stdin  | the fd the program is on (often it will be the terminal) |
+|  1 | stdout | ?                                                        |
+|  2 | stderr | ?                                                        |
+
+For a simple example, the below snippet shows us opening a file with ~open()~,
+the macros ~O_WRONLY~ and ~O_CREAT~ and the permissions octal 0644 mean we can
+create the file with write permissions. The bitwise or ~|~ lets us join the
+flags.
+
+#+begin_src c
+#include "pipex.h"
+
+int main()
+{
+	int fd;
+
+	fd = open("../testing/example.txt", O_WRONLY | O_CREAT, 0644);
+	if (fd < 0)
+		error_exit("dont work");
+	dup2(fd, STDOUT_FILENO);
+	close(fd);
+	ft_printf("here is some text to redirect\n");
+	return (0);
+}
+#+end_src
+
+Breaking down ~open()~ the call's input is this:
+
+| Object     | Function                           |
+|------------+------------------------------------|
+| str ""     | the path to the file               |
+| O_WRONLY   | open file in write only mode       |
+| O_CREAT    | create the file if it doesnt exist |
+| bitwise or | tell open() to apply both flags.   |
+| 0644       | what permissions to give the file  |
+
+
+The permission octal is broken down as such. Write permissions are 2, read is 4.
+The leading 0 is just to make the number an octal.
+
+| number             | 6            | 4     | 4      |
+|--------------------+--------------+-------+--------|
+| who is meant ?     | owner        | group | others |
+| which permissions? | read + write | read  | read   |
+| construction       | 4 + 2        | 4     | 4      |
+
+
+after that, returning the content of the file in ~../testing/example.txt~ will
+show you the text from ft_printf. even though ft_printf sends its content to
+stdin, the dup2 command redirected it to the fd received from the ~open()~
+command.
+** getting permissions in C
+while we saw how permissions can be generated with calls to ~open()~, what would
+it mean it see what permissions our program has at runtime? for this we can test
+permissions using the ~access()~ function.
+
+it takes 2 arguments. a path argument (the string) and a flag for which type of
+access we are checking.
+
+| flag | check type       |
+|------+------------------|
+| R_OK | read access      |
+| W_OK | write access     |
+| X_OK | execution access |
+| F_OK | file exists      |
+
+from the man page (man 3 access):
+
+#+begin_quote
+RETURN VALUE
+       Upon successful completion, these functions shall return 0.  Otherwise,
+       these functions shall return -1 and set errno to indicate the error.
+#+end_quote
+
+so if access returns 0, we good. otherwise, we aint got access. simples.
+#+begin_src c
+int test_permission(char *path)
+{
+	ft_printf("PERMISSIONS: \n\n");
+	ft_printf("testing if we can access %s\n", path);
+	if (access(path, F_OK) == 0)
+		ft_printf("File exists!\n");
+	else
+		error_exit("File does not exist, exiting.\n");
+	if (access(path, R_OK) == 0)
+		ft_printf("Read permission confirmed. \n");
+	if (access(path, W_OK) == 0)
+		ft_printf("Write permission confirmed. \n");
+	if (access(path, X_OK) == 0)
+		ft_printf("Executable permission confirmed \n");
+	return (EXIT_SUCCESS);
+}
+#+end_src
+** calling a program from within our program
+
+if we want to call an external program, we can use ~execve~. this is a system
+call that lets you execute a program from within your program. we will need this
+to run our builtins.
+
+let us run a simple ~ls~ command in the current directory, with the ~-l~ flag.
+
+#+begin_src c
+int run_ls()
+{
+	char *args[3];
+
+	args[0] = "ls";
+	args[1] = "-l";
+	args[2] = NULL;
+	execve("/bin/ls", args, NULL);
+	ft_printf("you will never see this!");
+
+	return (0);
+}
+#+end_src
+
+a few things to note. ~execve~ essentially hi-jacks our session. you won't
+actually see the printf statement, we create an ~args~ array that contains the
+command and the flags we want to pass to it and NULL for the environment
+variables? (i do not understand why)
+
+but what if we want to stay in the context of the program we are in?
+** Forking Hell!
+
+with ~fork()~, we can create a new process, known as a child, and the original
+process the parent.
+
+#+begin_src c
+int fork_my_program()
+{
+	pid_t pid;
+
+	pid = fork();
+	if (pid == -1)
+		error_exit(EXIT_FAILURE);
+
+	if (pid == 0)
+		printf("im a baby! call me baby. (pid: %d)\n", getpid());
+	else
+		printf("Im big daddy. (pid: %d)\n", getpid());
+	return (0);
+}
+#+end_src
+
+The way I understand this that the process clones itself AFTER the fork, but it
+is assigned a different PID, so the if-else check catches the parent as not
+having a fork.
+
+** Pipes (that long l that looks like |)
+
+a pipe is a one way street for data - if we want to send info from one process
+to another, we can use a pipe.
+
+the fd[2] is because we need to store two file descriptors for each of the
+processes. first we create the pipe between the two processes with ~pipe(fd)~
+which accepts our array of file descriptors, building the one way street between
+them. the read-end is at fd[0], and the write end is at fd[1].
+
+#+begin_src c
+int piping_hot()
+{
+	int fd[2];
+	pid_t pid;
+	char buffer[27];
+
+	if (pipe(fd) == -1)
+		error_exit("pipe didnt work.")
+	pid = fork();
+	if (pid == -1)
+		error_exit("fork didnt work.")
+	if (pid == 0)
+	{
+		close(fd[0]); // close the read end of the pipe
+		write(fd[1], "child says hello to parent", 27);
+		close(fd[1]); // close the write end of the pipe
+		exit(EXIT_SUCCESS);
+	}
+	else
+	{
+		close(fd[1]); // close the write end of the pipe
+		read(fd[0], buffer, 27);
+		close(fd[0]); // close the read end of the pipe
+		printf("Message from child: '%s'\n", buffer);
+		exit(EXIT_SUCCESS);
+	}
+}
+#+end_src
+
+
+
+** destroying a file (unlinking)
+
+how do you delete stuff in C? let's say you grew tired of your love letter
+called ~example.txt~. we can use ~unlink~ for that.
+
+#+begin_src c
+int delete_file(char *file)
+{
+	if (unlink(file) == 0)
+		ft_printf("%s successfully deleted.", file);
+	else
+		error_exit("Error deleting %s", file);
+	return (EXIT_SUCCESS);
+}
+#+end_src
+
+running this with our permissions tester, it shows it existed, and then didnt.
+
+
+#+begin_quote
+PERMISSIONS:
+
+testing if we can access example.txt
+File exists!
+Read permission confirmed.
+Write permission confirmed.
+example.txt successfully deleted.
+PERMISSIONS:
+
+testing if we can access example.txt
+File does not exist, exiting.
+#+end_quote
+
+** after killing your love letter, comes execution
+
+#+begin_src c
+int execution(void)
+{
+	pid_t pid;
+
+	pid = fork();
+	if (pid == -1)
+		error_exit("fork didnt work.");
+
+	else if (pid == 0)
+	{
+		printf("I am the child process.\n");
+		sleep(2);
+		exit(EXIT_SUCCESS);
+	}
+	else
+	{
+		ft_printf("I am the parent process.\n");
+		wait(NULL);
+		ft_printf("Child process terminated after a 2s delay.\n");
+	}
+	return (EXIT_SUCCESS);
+}
+#+end_src
+
+* program structure
+
+** TODO handle input
+** TODO handle unexpected input
+** TODO here_doc
+** TODO infile
+** TODO outfile
+
+* execution
+* design of the pipex program
+one way to implement the basic structure could look like this.
+
+#+begin_src c
+typedef struct s_pipex
+{
+	int in_fd;
+	int out_fd;
+	int here_doc;
+	int is_invalid_infile;
+	char **cmd_paths;
+	char ***cmd_args;
+	int cmd_count;
+} t_pipex;
+#+end_src
+
+* pitfalls (from reactive.so)
+
+- Not using unlink(1) to remove temporary files.
+- Using the wrong permissions when
+using open(2). The outfile needs to be opened with different permission
+depending on whether or not here_doc was used. Not appending NULL to the end of
+argv in execve(2). Doing so may lead to an invalid read. Not setting default
+values to your struct. This may lead to warnings from Valgrind (which shouldn’t
+cause a fail) if you use these properties in a conditional check (if, else,
+while, etc…). Mishandling invalid commands. You may not face this issue
+depending on how you developed your program, but in mine, it was possible to get
+NULL in cmd_paths, due to the command being invalid. If that’s your case too,
+it’s not a problem, just make sure you know what you’re doing. Not mimicking the
+behaviour of BASH. An invalid infile or command DOES NOT mean you exit the
+program. Special edge cases: /dev/urandom and /dev/stdin
